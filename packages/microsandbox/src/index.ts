@@ -468,7 +468,10 @@ export const microsandbox = defineProvider<MicrosandboxHandle, MicrosandboxConfi
         }
         if (snapshotError) throw snapshotError;
 
+        // `id` and `snapshotId` both carry the name: consumers split on which key they read
+        // (computesdk's manager tracks `snapshotId`; delete-after-measure harnesses read `id`).
         return {
+          id: name,
           snapshotId: name,
           sandboxId,
           name,
