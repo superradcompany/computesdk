@@ -1,0 +1,40 @@
+<svg width="720" height="430" viewBox="0 0 720 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Chart of computesdk providers by where they run and how they isolate. Microsandbox is the only provider that is both local and microVM-isolated.">
+  <rect width="720" height="430" fill="#0d1117"/>
+  <text x="40" y="34" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#e6edf3">where each provider runs, and what isolates it</text>
+
+  <rect x="390" y="60" width="290" height="150" rx="6" fill="#2ea043" opacity="0.14"/>
+
+  <line x1="90" y1="210" x2="680" y2="210" stroke="#30363d" stroke-width="1"/>
+  <line x1="390" y1="60" x2="390" y2="360" stroke="#30363d" stroke-width="1"/>
+  <rect x="90" y="60" width="590" height="300" rx="6" fill="none" stroke="#30363d" stroke-width="1"/>
+
+  <text x="96" y="80" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">microVM isolation</text>
+  <text x="96" y="352" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">container / host process</text>
+  <text x="90" y="382" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">needs a provider cloud + API key</text>
+  <text x="680" y="382" text-anchor="end" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">runs on your machine</text>
+
+  <circle cx="180" cy="110" r="5" fill="#6e7681"/>
+  <text x="192" y="114" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">e2b</text>
+  <circle cx="175" cy="165" r="5" fill="#6e7681"/>
+  <text x="187" y="169" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">vercel</text>
+  <circle cx="280" cy="135" r="5" fill="#6e7681"/>
+  <text x="292" y="139" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">codesandbox</text>
+  <circle cx="300" cy="90" r="5" fill="#6e7681"/>
+  <text x="312" y="94" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">blaxel</text>
+
+  <circle cx="190" cy="265" r="5" fill="#6e7681"/>
+  <text x="202" y="269" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">daytona</text>
+  <circle cx="295" cy="300" r="5" fill="#6e7681"/>
+  <text x="307" y="304" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">modal</text>
+
+  <circle cx="490" cy="265" r="5" fill="#6e7681"/>
+  <text x="502" y="269" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">docker</text>
+  <circle cx="560" cy="325" r="5" fill="#6e7681"/>
+  <text x="572" y="329" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">just-bash</text>
+
+  <circle cx="530" cy="130" r="7" fill="#3fb950"/>
+  <text x="542" y="134" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#3fb950">microsandbox</text>
+  <text x="542" y="152" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#8b949e">this PR</text>
+
+  <text x="90" y="412" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">local providers share your kernel; VM-isolated providers need an account. microsandbox is the only one that is both.</text>
+</svg>
