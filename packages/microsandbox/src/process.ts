@@ -391,7 +391,7 @@ class MicrosandboxJobHandle implements ProcessHandle {
 
   constructor(
     private readonly job: Job,
-    private readonly attachment: JobAttachment,
+    private readonly attachment: JobAttachment | null,
     private readonly options: StartProcessOptions,
     initialPid: number | null,
   ) {
@@ -410,22 +410,36 @@ class MicrosandboxJobHandle implements ProcessHandle {
     let exitCode: number | null = null;
 
     try {
-      for await (const event of this.attachment) {
-        if (event.type === 'output') {
-          const { source, data } = event.value;
-          if (source === 'stdout' || source === 'output') {
-            const text = outDecoder.decode(data, { stream: true });
+      if (this.attachment) {
+        for await (const event of this.attachment) {
+          if (event.type === 'output') {
+            const { source, data } = event.value;
+            if (source === 'stdout' || source === 'output') {
+              const text = outDecoder.decode(data, { stream: true });
+              this.stdout += text;
+              if (text) this.options.onStdout?.(text);
+            } else if (source === 'stderr') {
+              const text = errDecoder.decode(data, { stream: true });
+              this.stderr += text;
+              if (text) this.options.onStderr?.(text);
+            }
+          } else if (event.type === 'completed') {
+            this.currentPid = event.value.pid ?? this.currentPid;
+            exitCode = event.value.timedOut ? TIMEOUT_EXIT_CODE : (event.value.exitCode ?? -1);
+            break;
+          }
+        }
+      } else {
+        for (const entry of await this.job.logs()) {
+          if (entry.source === 'stdout' || entry.source === 'output') {
+            const text = outDecoder.decode(entry.data, { stream: true });
             this.stdout += text;
             if (text) this.options.onStdout?.(text);
-          } else if (source === 'stderr') {
-            const text = errDecoder.decode(data, { stream: true });
+          } else if (entry.source === 'stderr') {
+            const text = errDecoder.decode(entry.data, { stream: true });
             this.stderr += text;
             if (text) this.options.onStderr?.(text);
           }
-        } else if (event.type === 'completed') {
-          this.currentPid = event.value.pid ?? this.currentPid;
-          exitCode = event.value.timedOut ? TIMEOUT_EXIT_CODE : (event.value.exitCode ?? -1);
-          break;
         }
       }
     } catch {
@@ -466,7 +480,7 @@ class MicrosandboxJobHandle implements ProcessHandle {
     if (!this.options.stdin) {
       throw new Error(`microsandbox: process ${this.jobId} was not started with stdin: true`);
     }
-    if (this.exitResult) {
+    if (this.exitResult || !this.attachment) {
       throw new Error(`microsandbox: process ${this.jobId} has exited`);
     }
     const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
@@ -539,6 +553,9 @@ class MicrosandboxJobHandle implements ProcessHandle {
   }
 }
 
+/** Max bytes replayed when attaching to a newly launched Job so early output is not missed. */
+const JOB_REPLAY_BYTES = 1024 * 1024;
+
 /**
  * Start a runtime-owned detached process over the 0.8.x Job + JobAttachment API
  * (supported on local sandboxes).
@@ -555,6 +572,22 @@ export async function startMicrosandboxProcess(
     }
     return configured;
   });
-  const [info, attachment] = await Promise.all([job.inspect(), job.attach()]);
+  const [info, attachment] = await Promise.all([
+    job.inspect(),
+    job
+      .attachWith((builder) => {
+        let configured = builder.replayRecent(JOB_REPLAY_BYTES);
+        if (!options.stdin) configured = configured.readOnly(true);
+        return configured;
+      })
+      .catch(async (error: unknown) => {
+        // A very fast command can exit before attachWith subscribes.
+        const current = await job.inspect().catch(() => null);
+        if (current && current.state !== 'running' && current.state !== 'starting') {
+          return null;
+        }
+        throw error;
+      }),
+  ]);
   return new MicrosandboxJobHandle(job, attachment, options, info.pid);
 }

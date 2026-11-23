@@ -204,7 +204,40 @@ vi.mock('microsandbox', () => {
       };
     }
 
+    attachOptions: { readOnly: boolean; replayRecent: number | undefined } = {
+      readOnly: false,
+      replayRecent: undefined,
+    };
+
     async attach() {
+      return this.attachWith((b) => b);
+    }
+
+    async attachWith(
+      configure: (builder: {
+        readOnly(value?: boolean): any;
+        replayRecent(maxBytes: number): any;
+      }) => any,
+    ) {
+      const opts = { readOnly: false, replayRecent: undefined as number | undefined };
+      const builder = {
+        readOnly(value = true) {
+          opts.readOnly = value;
+          return builder;
+        },
+        replayRecent(maxBytes: number) {
+          opts.replayRecent = maxBytes;
+          return builder;
+        },
+      };
+      configure(builder);
+      this.attachOptions = opts;
+      if (this.execOptions.stdin === 'null' && !opts.readOnly) {
+        throw Object.assign(
+          new Error('stdin_closed: job input is unavailable; attach read-only or read its logs'),
+          { code: 'stdin_closed' },
+        );
+      }
       const job = this;
       return {
         async writeStdin(chunk: Uint8Array) {
@@ -222,6 +255,10 @@ vi.mock('microsandbox', () => {
           }
         },
       };
+    }
+
+    async logs() {
+      return [];
     }
 
     async signal(sig: number) {
@@ -680,14 +717,14 @@ vi.mock('microsandbox', () => {
 
       this.volumes = {
         builder: (name: string) => {
-          let sizeMib: number | undefined;
+          let quotaMib: number | undefined;
           const builder = {
-            size(mib: number) {
-              sizeMib = mib;
+            quota(mib: number) {
+              quotaMib = mib;
               return builder;
             },
             async create() {
-              const vol = { id: `vol-${name}`, name, sizeMib };
+              const vol = { id: `vol-${name}`, name, quotaMib };
               mock.volumes.set(name, vol);
               return vol;
             },
@@ -1363,6 +1400,8 @@ describe('microsandbox provider', () => {
     const proc = await sandbox.startProcess('sleep 60');
 
     expect(mock.lastJob.execOptions.stdin).toBe('null');
+    expect(mock.lastJob.attachOptions.readOnly).toBe(true);
+    expect(mock.lastJob.attachOptions.replayRecent).toBeGreaterThan(0);
     await expect(proc.write('nope')).rejects.toThrow(/not started with stdin: true/);
     await expect(proc.wait({ timeout: 10 })).rejects.toThrow(/did not exit within 10ms/);
 
@@ -1462,21 +1501,28 @@ describe('microsandbox provider', () => {
     expect(mock.stopAttempts).toBe(0);
   });
 
-  it('manages volumes through ctx.volumes and returns null on volumeNotFound', async () => {
-    const provider = microsandbox({ backend: 'local' });
-    const created = await provider.volume!.create({ name: 'models', sizeBytes: 1500 * 1024 });
+  it('manages volumes through ctx.volumes with MiB/GiB quota rounding and returns null on volumeNotFound', async () => {
+    const localProvider = microsandbox({ backend: 'local' });
+    const created = await localProvider.volume!.create({ name: 'models', sizeBytes: 1500 * 1024 });
     expect(created).toMatchObject({ id: 'vol-models', name: 'models' });
-    expect(mock.volumes.get('models')?.sizeMib).toBe(2);
+    expect(mock.volumes.get('models')?.quotaMib).toBe(2);
 
-    expect(await provider.volume!.get('models')).toMatchObject({ id: 'vol-models', name: 'models' });
-    expect(await provider.volume!.get('missing')).toBeNull();
-    expect(await provider.volume!.list()).toHaveLength(1);
+    const cloudProvider = microsandbox({ apiKey: 'key' });
+    await cloudProvider.volume!.create({ name: 'cloud-models', sizeBytes: 1500 * 1024 });
+    expect(mock.volumes.get('cloud-models')?.quotaMib).toBe(1024);
+
+    expect(await localProvider.volume!.get('models')).toMatchObject({
+      id: 'vol-models',
+      name: 'models',
+    });
+    expect(await localProvider.volume!.get('missing')).toBeNull();
+    expect(await localProvider.volume!.list()).toHaveLength(2);
 
     mock.volumeGetError = new Error('boom');
-    await expect(provider.volume!.get('models')).rejects.toThrow('boom');
+    await expect(localProvider.volume!.get('models')).rejects.toThrow('boom');
     mock.volumeGetError = null;
 
-    await provider.volume!.delete('models');
+    await localProvider.volume!.delete('models');
     expect(mock.removedVolumes).toEqual(['models']);
   });
 

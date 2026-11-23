@@ -888,7 +888,11 @@ function makeProvider(backend: 'local' | 'cloud') {
           const ctx = await config._getContext();
           let builder = ctx.volumes.builder(options.name);
           if (options.sizeBytes) {
-            builder = builder.size(Math.ceil(options.sizeBytes / (1024 * 1024)));
+            const mib =
+              ctx.kind === 'remote'
+                ? Math.max(1, Math.ceil(options.sizeBytes / (1024 * 1024 * 1024))) * 1024
+                : Math.max(1, Math.ceil(options.sizeBytes / (1024 * 1024)));
+            builder = builder.quota(mib);
           }
           const volume = await builder.create();
           return { id: volume.id, name: volume.name, native: volume };
