@@ -5,7 +5,7 @@ Microsandbox provider for ComputeSDK. It runs the same sandbox API against hardw
 ## Requirements
 
 - Node.js 22 or newer
-- Cloud backend: microsandbox cloud access and an API key
+- Cloud backend: microsandbox cloud access and an API key (or configured profile)
 - Local backend: macOS on Apple Silicon, Linux with KVM, or Windows with Windows Hypervisor Platform
 
 ## Installation
@@ -16,7 +16,7 @@ npm install computesdk @computesdk/microsandbox
 
 ## Cloud quick start
 
-Cloud is the default backend. Pass an API key directly or omit it to use the microsandbox SDK's `MSB_API_KEY`, `MSB_PROFILE`, or active-profile resolution:
+Cloud is the default backend. Pass an API key directly or omit it to resolve `MSB_API_KEY` (with optional `MSB_API_URL`) or `MSB_PROFILE`:
 
 ```typescript
 import { compute } from 'computesdk';
@@ -57,7 +57,7 @@ console.log((await sandbox.runCommand('node /tmp/hello.js')).stdout);
 await sandbox.destroy();
 ```
 
-Calling `microsandbox()` with no configuration uses cloud through the microsandbox SDK's standard environment and active-profile resolution. If no cloud credentials resolve, the provider reports how to configure cloud or opt into `backend: 'local'`; it never silently falls back to local.
+Calling `microsandbox()` with no configuration uses cloud through `MSB_API_KEY` or `MSB_PROFILE`. If neither resolves, the provider reports how to configure cloud or opt into `backend: 'local'`; it never silently falls back to local.
 
 Use a named cloud profile instead of an API key when appropriate:
 
@@ -65,49 +65,54 @@ Use a named cloud profile instead of an API key when appropriate:
 const provider = microsandbox({ profile: 'production' });
 ```
 
+Each provider instance owns an isolated `LocalContext` or `RemoteContext` from `microsandbox@0.8.1`, so multiple tenants, profiles, endpoints, and mixed local/cloud providers run concurrently in the same Node.js process with no shared process-wide backend state.
+
 ## Configuration
 
 ```typescript
 interface MicrosandboxConfig {
-  backend?: 'cloud' | 'local'; // Defaults to cloud
-  apiKey?: string;             // Falls back to MSB_API_KEY
-  apiUrl?: string;             // Optional endpoint override; requires apiKey
-  profile?: string;            // Named cloud profile; mutually exclusive with apiKey/apiUrl
+  backend?: 'cloud' | 'local';         // Defaults to cloud
+  apiKey?: string;                     // Falls back to MSB_API_KEY
+  apiUrl?: string;                     // Optional endpoint override; requires apiKey
+  profile?: string;                    // Named cloud profile; mutually exclusive with apiKey/apiUrl
+  computeType?: 'standard' | 'shared'; // Cloud compute tier (cloud backend only)
+  requestTimeoutMs?: number;           // Cloud HTTP request timeout in ms (cloud backend only)
+  home?: string;                       // Custom local home directory (local backend only)
+  configPath?: string;                 // Custom local config file path (local backend only)
   image?: string;
   cpus?: number;
   memoryMib?: number;
   rootDiskMib?: number;
-  ephemeral?: boolean;         // Delete on stop; defaults to true
+  ephemeral?: boolean;                 // Delete on stop; defaults to true
   workdir?: string;
   namePrefix?: string;
   ports?: Array<number | { host: number; guest: number; bind?: string }>;
-  timeout?: number;           // Idle and command timeout in milliseconds; defaults to 900_000 (15 minutes)
+  timeout?: number;                    // Idle and command timeout in milliseconds; defaults to 900_000 (15 minutes)
   pullPolicy?: 'always' | 'if-missing' | 'never';
   networkEnabled?: boolean;
 }
 ```
 
-Per-sandbox `image`, `templateId`, `snapshotId`, `cpus`, `vcpus`, `memory`, `memoryMb`, `memoryMiB`, `memoryMib`, `memMiB`, `rootDiskMib`, `ephemeral`, `timeout`, `name`, `envs`, `metadata`, and `ports` options override or extend provider defaults where applicable.
+Per-sandbox `image`, `templateId`, `runtime` (`node` or `python`), `snapshotId`, `cpus`, `vcpus`, `memory`, `memoryMb`, `memoryMiB`, `memoryMib`, `memMiB`, `rootDiskMib`, `ephemeral`, `timeout`, `name`, `directory`, `envs`, `metadata`, `volumes` (including `readOnly`), and `ports` options override or extend provider defaults where applicable.
+
+`sandbox.getInstance()` returns the native `microsandbox` `Sandbox` handle directly.
 
 ## Backend support
-
-Operations run concurrently using the selected process-wide backend. Do not change the native SDK default backend while provider operations are running.
 
 | Method | Local | Cloud |
 |---|---|---|
 | `create`, `getById`, `list`, `destroy` | Yes | Yes |
-| `runCommand` and live output callbacks | Yes | Yes |
+| `runCommand` and live output callbacks | Yes (direct `execWith` / `execStreamWith`) | Yes (relay-safe detached worker / `execStreamWith`) |
+| `startProcess` | Native `Job`-backed | Shell runtime fallback |
+| `pause` / `resume` | Yes (resident VM suspend) | Not exposed (local-only) |
 | `filesystem` | Yes | Yes |
+| `volume` | Yes (directory `.quota()` or `kind: 'disk'`, labels, `list({ limit })`) | Yes (directory volumes with whole-GiB `.quota()`, labels, `list({ limit })`) |
+| `snapshot` | Yes (live full memory + rootfs, CoW multi-restore `fork: true`, keeps source running) | Yes (disk-only capture, stops/restarts persistent `ephemeral: false` source) |
 | `getInfo` | Yes | Yes |
 | `getUrl` | Yes, for ports declared before create | Not currently available |
-| `snapshot` | Yes, disk state | Not currently available |
 
-Local snapshots stop the sandbox, capture its writable root disk, and restart it. Files on that disk survive the restore, but tmpfs paths such as `/tmp` and running processes are not captured. Microsandbox cloud does not currently support published ports or disk snapshots, so those methods return explicit unsupported errors on cloud.
+Sandboxes are ephemeral by default and are deleted when they stop. Their default idle timeout is 15 minutes, configured through the native SDK's `idleTimeoutSeconds(900)`. Set `ephemeral: false` to retain a sandbox after stopping (required for disk-only snapshot fallback), and use `timeout` (milliseconds) to override the idle timeout and default command timeout.
 
 ## License
 
 MIT
-
-Sandboxes are ephemeral by default and are deleted when they stop. Their default idle timeout is 15 minutes, configured through the native SDK’s `idleTimeout(900)`. Set `ephemeral: false` to retain a sandbox after stopping, and use `timeout` (milliseconds) to override the idle timeout and default command timeout. The adapter does not set a maximum lifetime.
-
-Use one backend configuration per process. Concurrent operations share that configuration; the first successful backend selection is retained for the lifetime of the process. Later requests with different credentials, endpoints, profiles, or backend selection are rejected before changing the SDK backend. Use the same explicit configuration everywhere, or consistently use SDK environment/profile resolution.
