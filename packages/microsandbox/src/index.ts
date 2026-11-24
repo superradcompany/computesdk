@@ -14,8 +14,10 @@ import type {
   InstanceInfo,
   InstanceSizeManager,
   ListSnapshotsOptions,
+  ListVolumesOptions,
   ProcessRuntimeOptions,
   Provider,
+  SnapshotCapabilities,
   Volume,
   VolumeMount,
 } from '@computesdk/provider';
@@ -25,6 +27,7 @@ import type {
   Context,
   Sandbox,
   SandboxConfigInspection,
+  Volume as NativeVolume,
 } from 'microsandbox';
 import {
   runMicrosandboxCommand,
@@ -248,6 +251,10 @@ function isVolumeNotFound(error: unknown): boolean {
   return errorCode(error) === 'volumeNotFound';
 }
 
+function isSnapshotNotFound(error: unknown): boolean {
+  return errorCode(error) === 'snapshotNotFound';
+}
+
 function isFileNotFound(error: unknown): boolean {
   const code = errorCode(error);
   if (code === 'ENOENT') return true;
@@ -440,6 +447,35 @@ function toSnapshotInfo(
   };
 }
 
+function toVolumeInfo(volume: NativeVolume): Volume {
+  return {
+    id: volume.id,
+    name: volume.name,
+    ...(volume.kind ? { kind: volume.kind } : {}),
+    ...(volume.createdAt ? { createdAt: volume.createdAt } : {}),
+    native: volume,
+  };
+}
+
+const LOCAL_SNAPSHOT_CAPABILITIES: SnapshotCapabilities = {
+  scope: 'rootfs',
+  memory: true,
+  destroysSource: false,
+  source: 'kept',
+  fork: true,
+  readiness: 'immediate',
+};
+
+const CLOUD_SNAPSHOT_CAPABILITIES: SnapshotCapabilities = {
+  scope: 'rootfs',
+  memory: false,
+  destroysSource: false,
+  source: 'kept',
+  excludes: ['/tmp'],
+  readiness: 'immediate',
+  createOptions: { ephemeral: false },
+};
+
 function makeProvider(backend: 'local' | 'cloud') {
   return defineProvider<Sandbox, MicrosandboxInternalConfig, never, MicrosandboxSnapshot>({
     name: PROVIDER,
@@ -503,6 +539,11 @@ function makeProvider(backend: 'local' | 'cloud') {
             }
             if (config.networkEnabled === false) restore = restore.disableNetwork();
             if (ctx.kind === 'local') {
+              // Accept unmapped external source mounts without inheriting host resources;
+              // any caller-provided `options.volumes` below are still explicitly bound.
+              if (typeof restore.allowMissingResources === 'function') {
+                restore = restore.allowMissingResources();
+              }
               for (const port of ports) {
                 restore = port.bind
                   ? restore.portBind(port.bind, port.host, port.guest)
@@ -763,17 +804,12 @@ function makeProvider(backend: 'local' | 'cloud') {
       },
 
       snapshot: {
-        // A live full-scope capture is tried first (source keeps running,
-        // memory checkpointed); where the backend rejects it we fall back to
-        // stopping the source for a disk-only capture, so files survive but
-        // processes do not. Declared capabilities stay on the conservative
-        // disk-only contract; a live capture leaves the source untouched.
-        capabilities: {
-          scope: 'rootfs',
-          memory: false,
-          destroysSource: false,
-          createOptions: { ephemeral: false },
-        },
+        // Local supports live full-scope (memory + rootfs) checkpoints with CoW
+        // multi-restore (`fork: true`) while keeping the source running. Cloud
+        // captures disk-only snapshots by stopping and restarting a persistent
+        // source (`ephemeral: false`).
+        capabilities:
+          backend === 'local' ? LOCAL_SNAPSHOT_CAPABILITIES : CLOUD_SNAPSHOT_CAPABILITIES,
 
         create: async (config, instanceId, options?: CreateSnapshotOptions) => {
           const ctx = await config._getContext();
@@ -879,7 +915,13 @@ function makeProvider(backend: 'local' | 'cloud') {
 
         delete: async (config, snapshotId) => {
           const ctx = await config._getContext();
-          await ctx.checkpoints.remove(snapshotId);
+          try {
+            // `force: true` is ignored on cloud and lets local remove snapshots
+            // even when newer checkpoints record historical ancestry in the index.
+            await ctx.checkpoints.remove(snapshotId, { force: true });
+          } catch (error) {
+            if (!isSnapshotNotFound(error)) throw error;
+          }
         },
       },
 
@@ -887,34 +929,52 @@ function makeProvider(backend: 'local' | 'cloud') {
         create: async (config, options) => {
           const ctx = await config._getContext();
           let builder = ctx.volumes.builder(options.name);
-          if (options.sizeBytes) {
+          const isLocalDisk = ctx.kind === 'local' && options.kind === 'disk';
+          if (isLocalDisk) {
+            builder = builder.disk();
+            if (options.sizeBytes) {
+              builder = builder.size(Math.max(1, Math.ceil(options.sizeBytes / (1024 * 1024))));
+            }
+          } else if (options.sizeBytes) {
             const mib =
               ctx.kind === 'remote'
                 ? Math.max(1, Math.ceil(options.sizeBytes / (1024 * 1024 * 1024))) * 1024
                 : Math.max(1, Math.ceil(options.sizeBytes / (1024 * 1024)));
             builder = builder.quota(mib);
           }
+          if (options.labels && typeof options.labels === 'object') {
+            for (const [key, value] of Object.entries(options.labels as Record<string, unknown>)) {
+              if (value !== undefined) builder = builder.label(key, String(value));
+            }
+          }
           const volume = await builder.create();
-          return { id: volume.id, name: volume.name, native: volume };
+          return toVolumeInfo(volume);
         },
         get: async (config, name: string) => {
           const ctx = await config._getContext();
           try {
             const volume = await ctx.volumes.get(name);
-            return { id: volume.id, name: volume.name, native: volume };
+            return toVolumeInfo(volume);
           } catch (error) {
             if (isVolumeNotFound(error)) return null;
             throw error;
           }
         },
-        list: async (config) => {
+        list: async (config, options?: ListVolumesOptions) => {
           const ctx = await config._getContext();
           const volumes = await ctx.volumes.list();
-          return volumes.map((volume) => ({ id: volume.id, name: volume.name, native: volume }));
+          const mapped = volumes.map(toVolumeInfo);
+          return options?.limit !== undefined && options.limit >= 0
+            ? mapped.slice(0, options.limit)
+            : mapped;
         },
         delete: async (config, name: string) => {
           const ctx = await config._getContext();
-          await withVolumeSettle(() => ctx.volumes.remove(name));
+          try {
+            await withVolumeSettle(() => ctx.volumes.remove(name));
+          } catch (error) {
+            if (!isVolumeNotFound(error)) throw error;
+          }
         },
       },
     },

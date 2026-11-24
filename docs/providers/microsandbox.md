@@ -95,7 +95,10 @@ const result = await sandbox.runCommand('node app.js', {
 
 - **Pause/resume:** Exposed on `backend: 'local'` only (`pause()`/`resume()` suspend the resident VM and preserve memory and processes). Cloud providers omit `pause`/`resume` from their capability surface.
 - **Published ports:** Local-only via `ports` declared before sandbox creation. Cloud does not currently expose published guest ports and returns an explicit error on `getUrl`.
-- **Snapshots:** Supported on both local and cloud backends. `snapshot.create` tries a live full-scope checkpoint first; when the backend does not support live full capture, it falls back to stopping the source (which requires `{ ephemeral: false }`), capturing the writable root disk, and restarting the source via `ensureRunning()`.
+- **Snapshots:** Supported on both local and cloud backends with accurate per-backend `snapshot.capabilities`:
+  - On `local`: declares `memory: true, fork: true, source: 'kept'`. Live full-scope capture checkpoints memory and rootfs while keeping the source running (even for ephemeral sandboxes) and restores via CoW memory into one or more independent sandboxes. Wait for or terminate active `startProcess` jobs before full capture (regular guest background processes survive). Unmapped external mounts from the source are safely left unmounted (`allowMissingResources()`) unless explicitly re-bound via `volumes`.
+  - On `cloud`: declares `memory: false, excludes: ['/tmp'], createOptions: { ephemeral: false }`. Captures disk state by stopping a persistent (`ephemeral: false`) source, capturing the writable root disk, and restarting it via `ensureRunning()`.
+- **Volumes:** Supported on both backends (`create`, `get`, `list({ limit })`, and idempotent `delete`), with `labels` and create/restore-time `VolumeMount` (`readOnly`). Local defaults to directory volumes with MiB `.quota()` (or raw ext4 with `kind: 'disk'`); cloud rounds `sizeBytes` up to whole-GiB `.quota()` multiples.
 
 ```typescript
 const provider = microsandbox({

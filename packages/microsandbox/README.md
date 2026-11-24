@@ -106,8 +106,8 @@ Per-sandbox `image`, `templateId`, `runtime` (`node` or `python`), `snapshotId`,
 | `startProcess` | Native `Job`-backed | Shell runtime fallback |
 | `pause` / `resume` | Yes (resident VM suspend) | Not exposed (local-only) |
 | `filesystem` | Yes | Yes |
-| `volume` | Yes | Yes |
-| `snapshot` | Yes (live full capture when supported, disk fallback otherwise) | Yes (live full capture when supported, disk fallback otherwise) |
+| `volume` | Yes (directory `.quota()` or `kind: 'disk'`, labels, `list({ limit })`) | Yes (directory volumes with whole-GiB `.quota()`, labels, `list({ limit })`) |
+| `snapshot` | Yes (live full memory + rootfs, CoW multi-restore `fork: true`, keeps source running) | Yes (disk-only capture, stops/restarts persistent `ephemeral: false` source) |
 | `getInfo` | Yes | Yes |
 | `getUrl` | Yes, for ports declared before create | Not currently available |
 

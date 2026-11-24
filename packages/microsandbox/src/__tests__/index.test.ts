@@ -36,7 +36,7 @@ const mock = vi.hoisted(() => ({
   skipSandboxOnError: false,
   liveSnapshotUnsupported: true,
   checkpoints: new Map<string, any>(),
-  removedCheckpoints: [] as string[],
+  removedCheckpoints: [] as Array<{ ref: string; force?: boolean }>,
   volumes: new Map<string, any>(),
   volumeGetError: null as Error | null,
   removedVolumes: [] as string[],
@@ -623,6 +623,10 @@ vi.mock('microsandbox', () => {
               restoreConfig.cowMemory = true;
               return builder;
             },
+            allowMissingResources() {
+              restoreConfig.allowMissingResources = true;
+              return builder;
+            },
             disableNetwork() {
               restoreConfig.networkDisabled = true;
               return builder;
@@ -709,22 +713,48 @@ vi.mock('microsandbox', () => {
           return cp;
         },
         list: async () => [...mock.checkpoints.values()],
-        remove: async (ref: string) => {
-          mock.removedCheckpoints.push(ref);
+        remove: async (ref: string, options?: { force?: boolean }) => {
+          if (!mock.checkpoints.has(ref)) {
+            throw Object.assign(new Error('snapshot not found'), { code: 'snapshotNotFound' });
+          }
+          mock.removedCheckpoints.push({ ref, force: options?.force });
           mock.checkpoints.delete(ref);
         },
       };
 
       this.volumes = {
         builder: (name: string) => {
+          let kind: 'dir' | 'disk' = 'dir';
           let quotaMib: number | undefined;
+          let sizeMib: number | undefined;
+          const labels: Record<string, string> = {};
           const builder = {
+            disk() {
+              kind = 'disk';
+              return builder;
+            },
             quota(mib: number) {
               quotaMib = mib;
               return builder;
             },
+            size(mib: number) {
+              sizeMib = mib;
+              return builder;
+            },
+            label(key: string, value: string) {
+              labels[key] = value;
+              return builder;
+            },
             async create() {
-              const vol = { id: `vol-${name}`, name, quotaMib };
+              const vol = {
+                id: `vol-${name}`,
+                name,
+                kind,
+                quotaMib,
+                sizeMib,
+                labels,
+                createdAt: new Date('2026-08-15T00:00:00Z'),
+              };
               mock.volumes.set(name, vol);
               return vol;
             },
@@ -739,6 +769,9 @@ vi.mock('microsandbox', () => {
         },
         list: async () => [...mock.volumes.values()],
         remove: async (name: string) => {
+          if (!mock.volumes.has(name)) {
+            throw Object.assign(new Error('volume not found'), { code: 'volumeNotFound' });
+          }
           mock.removedVolumes.push(name);
           mock.volumes.delete(name);
         },
@@ -1423,10 +1456,19 @@ describe('microsandbox provider', () => {
     expect(mock.sandboxes.get('pause-box')!.statusValue).toBe('running');
   });
 
-  it('captures live full checkpoints when supported and restores with cowMemory, labels, envs, workdir, and volumes', async () => {
+  it('captures live full checkpoints on local, declares memory+fork capabilities, and restores safely', async () => {
     mock.liveSnapshotUnsupported = false;
     const provider = microsandbox({ backend: 'local', ports: [{ host: 4400, guest: 3000 }] });
-    const sandbox = await provider.instances.create({ name: 'live-src', ephemeral: false });
+    expect(provider.snapshot?.capabilities).toEqual({
+      scope: 'rootfs',
+      memory: true,
+      destroysSource: false,
+      source: 'kept',
+      fork: true,
+      readiness: 'immediate',
+    });
+
+    const sandbox = await provider.instances.create({ name: 'live-src' });
 
     const snap = await provider.snapshot!.create(sandbox.instanceId, {
       name: 'live-snap',
@@ -1454,6 +1496,7 @@ describe('microsandbox provider', () => {
       name: 'restored-live',
       snapshot: 'ref:live-snap',
       cowMemory: true,
+      allowMissingResources: true,
       workdir: '/app',
       envs: { RESTORED: '1' },
       ports: [{ host: 4400, guest: 3000 }],
@@ -1468,15 +1511,20 @@ describe('microsandbox provider', () => {
     expect(listed.map((s) => s.id)).toEqual(['ref:live-snap']);
 
     await provider.snapshot!.delete(snap.id);
-    expect(mock.removedCheckpoints).toEqual(['ref:live-snap']);
+    expect(mock.removedCheckpoints).toEqual([{ ref: 'ref:live-snap', force: true }]);
+    // Deleting an already-removed snapshot is idempotent.
+    await expect(provider.snapshot!.delete(snap.id)).resolves.toBeUndefined();
   });
 
-  it('falls back to stop, disk capture, and ensureRunning when live full capture is unsupported', async () => {
-    const provider = microsandbox({ backend: 'local' });
+  it('declares disk-only snapshot capabilities on cloud and falls back to stop, disk capture, and ensureRunning', async () => {
+    const provider = microsandbox({ apiKey: 'key' });
     expect(provider.snapshot?.capabilities).toEqual({
       scope: 'rootfs',
       memory: false,
       destroysSource: false,
+      source: 'kept',
+      excludes: ['/tmp'],
+      readiness: 'immediate',
       createOptions: { ephemeral: false },
     });
 
@@ -1488,6 +1536,10 @@ describe('microsandbox provider', () => {
     expect(mock.stopAttempts).toBe(1);
     expect(mock.ensureRunningCalls).toBe(1);
     expect(mock.sandboxes.get('disk-src')!.statusValue).toBe('running');
+
+    // Cloud restore must not pass local-only allowMissingResources().
+    await provider.instances.create({ name: 'cloud-restored', snapshotId: snap.id });
+    expect(mock.created[1].allowMissingResources).toBeUndefined();
   });
 
   it('refuses to snapshot a running ephemeral sandbox instead of stopping it away', async () => {
@@ -1501,11 +1553,30 @@ describe('microsandbox provider', () => {
     expect(mock.stopAttempts).toBe(0);
   });
 
-  it('manages volumes through ctx.volumes with MiB/GiB quota rounding and returns null on volumeNotFound', async () => {
+  it('manages volumes through ctx.volumes with quota/disk/labels, list limit, and idempotent delete', async () => {
     const localProvider = microsandbox({ backend: 'local' });
-    const created = await localProvider.volume!.create({ name: 'models', sizeBytes: 1500 * 1024 });
-    expect(created).toMatchObject({ id: 'vol-models', name: 'models' });
+    const created = await localProvider.volume!.create({
+      name: 'models',
+      sizeBytes: 1500 * 1024,
+      labels: { tier: 'fast' },
+    });
+    expect(created).toMatchObject({
+      id: 'vol-models',
+      name: 'models',
+      kind: 'dir',
+      createdAt: new Date('2026-08-15T00:00:00Z'),
+    });
     expect(mock.volumes.get('models')?.quotaMib).toBe(2);
+    expect(mock.volumes.get('models')?.labels).toEqual({ tier: 'fast' });
+
+    await localProvider.volume!.create({
+      name: 'raw-disk',
+      kind: 'disk',
+      sizeBytes: 10 * 1024 * 1024,
+    });
+    expect(mock.volumes.get('raw-disk')?.kind).toBe('disk');
+    expect(mock.volumes.get('raw-disk')?.sizeMib).toBe(10);
+    expect(mock.volumes.get('raw-disk')?.quotaMib).toBeUndefined();
 
     const cloudProvider = microsandbox({ apiKey: 'key' });
     await cloudProvider.volume!.create({ name: 'cloud-models', sizeBytes: 1500 * 1024 });
@@ -1514,9 +1585,11 @@ describe('microsandbox provider', () => {
     expect(await localProvider.volume!.get('models')).toMatchObject({
       id: 'vol-models',
       name: 'models',
+      kind: 'dir',
     });
     expect(await localProvider.volume!.get('missing')).toBeNull();
-    expect(await localProvider.volume!.list()).toHaveLength(2);
+    expect(await localProvider.volume!.list()).toHaveLength(3);
+    expect(await localProvider.volume!.list({ limit: 2 })).toHaveLength(2);
 
     mock.volumeGetError = new Error('boom');
     await expect(localProvider.volume!.get('models')).rejects.toThrow('boom');
@@ -1524,6 +1597,8 @@ describe('microsandbox provider', () => {
 
     await localProvider.volume!.delete('models');
     expect(mock.removedVolumes).toEqual(['models']);
+    // Deleting an already-removed volume is idempotent.
+    await expect(localProvider.volume!.delete('models')).resolves.toBeUndefined();
   });
 
   it('uses the native filesystem surface with parent creation, chunked writes, and idempotent remove', async () => {
